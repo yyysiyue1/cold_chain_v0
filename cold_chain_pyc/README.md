@@ -13,15 +13,17 @@
 ## 文件结构说明
 
 -   `main.py`: 项目主程序入口。
--   `advanced_prediction_models.py`: 存放高级预测模型代码。
--   `tvbn_predictor.py`: `tvbn` 预测模型的具体实现。
+-   `advanced_prediction_models.py`: 集中存放动态预测模型代码。
+-   `tvbn_predictor.py`: `tvbn` 预测模型的调用方法。
 -   `tvbn_predictor_model.pkl`: 训练好的 `tvbn` 模型文件。
 -   `train_tvbn_model.py`: 用于训练 `tvbn` 模型的脚本。
 -   `database_setup.py`: 数据库初始化和表结构创建脚本。
 -   `config.ini`: 项目配置文件，用于数据库连接、API 密钥等设置。
 -   `cold_chain_app.log`: 应用程序运行日志。
--   `warning_processing.py`: 负责处理各类系统警告。
+-   `prediction_logic.py` : 预测处理代码实现，具体对过期温度湿度标志物进行处理。
+-   `warning_processing.py`: 负责处理各类风险警告并将写入数据库。
 -   `README.md`: 本文件，项目说明。
+-   `quick_check_tvbn.py` : 测试动态预测模型的文件
 
 ## 安装
 
@@ -29,15 +31,14 @@
 
 1.  **克隆项目**
     ```bash
-    git clone 【您项目的git仓库地址，如果没有则忽略】
-    cd 【项目文件夹名称，例如：cold_chain_pyc】
+    git clone https://github.com/yyysiyue1/cold_chain.git
+    cd cold_chain_pyc
     ```
 
 2.  **安装依赖**
     ```bash
     pip install -r requirements.txt
     ```
-    *（如果您没有`requirements.txt`文件，请手动列出依赖，例如：`pip install pandas numpy scikit-learn ...`）*
 
 ## 使用
 
@@ -47,7 +48,7 @@
 2.  **运行项目**
     通过以下命令运行主程序：
     ```bash
-    python main.py
+    python main.py #这是运行所有代码
     ```
 
 3.  **其他脚本**
@@ -55,17 +56,39 @@
         ```bash
         python train_tvbn_model.py
         ```
+        如若使用新的模型可以在当前文件夹下新建文件并训练好 建立新类就可以外部调用，如tvbn_predictor.py一样
+      - 
     -   数据库初始化：
         ```bash
         python database_setup.py
         ```
+    -    动态预测方法：
+    - 动态预测方法以函数的方式放在了advanced_prediction_models.py  贡献者的动态预测方法可集中写在此处
 
 ## 贡献 (可选)
 
-如果您希望说明如何让其他人贡献代码，可以在这里写上。
+- TODO：其他贡献者可以将模型加入本系统直接实现半小时动态读取数据并处理后写入数据再预警的一条龙服务
+  - 重要函数：
+  - 1、execute_prediction_unit(row, food_info, engine, predictor_cache)
+      """
+      统一预测调度单元：根据食品分类执行专属模型预测。
+      predictor_cache 形如：{'tvbn': TVBNPredictor(...)}。
+      返回：list[dict]，可能为空。
+      """
+-  更具体的可以去prediction_logic.py中找见该函数理解模仿写
+- 2、find_previous_abnormal_value(order_number, rec_time, tra_code, order_tra_chain, engine, flag="化学")
+-     """
+    查找上一条预测值（支持温度/湿度）。
+     """
+- 这个是找上一条数据的含量值 对于动态预测方法会有需要
+- 3、find_previous_monitor_time(order_number, rec_time, tra_code, order_tra_chain, engine):
+    """
+    查找上一条监测数据的时间。
+    """
+- 这是寻找上一条数据的时间 对于动态预测的步长会有需要
 
 ## 许可证 (可选)
 
-本项目遵循 【请在此处填写，例如：MIT 许可证】。
+杨思越  许可证
 
 ---
