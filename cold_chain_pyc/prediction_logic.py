@@ -2,7 +2,7 @@ import pandas as pd # Although not used in this specific file, might be used wit
 
 from datetime import datetime, timedelta # Not directly used here
 import numpy as np # Not directly used here
-
+from typing import Optional, Tuple, Dict, Callable, Union
 import math
 from sqlalchemy import  text # 确保导入 text
 
@@ -733,7 +733,8 @@ def execute_prediction_unit(row, food_info, engine, predictor_cache):
             else:
                 predict_value = last_abnormal_value  # 如果时间无效，直接返回上一个值
             # 生成存储记录
-            tvbn_record = generate_tvbn_record(row, food_info, predict_value)
+            tvbn_record = generate_tvbn_record(row, food_info, predict_value, engine)  # flag 默认“化学”
+
             if tvbn_record:
                 records.append(tvbn_record)
     # 其它分类可以在这里扩展
@@ -745,40 +746,116 @@ def execute_prediction_unit(row, food_info, engine, predictor_cache):
 
 
 # ==============================================================================
-# --- TVB-N 风险等级判断---
+# ---标志物 风险等级判断---
 # ==============================================================================
-def determine_risk_level_tvbn(tvbn_value):
+# flag -> 表名（同时兼容中文/英文入参）
+_TABLE_MAP = {
+    "chem": "chemicalmarker_risk_level",
+    "化学": "chemicalmarker_risk_level",
+    "bio":  "biomarker_risk_level",
+    "生物":  "biomarker_risk_level",
+}
+_NEEDED_COLS = ["FoodClassificationCode", "LowRiskLine", "MiddleRiskLine", "HighRiskLine"]
+# 惰性缓存：key=规范化flag('chem'/'bio') -> DataFrame(index=FoodClassificationCode)
+_threshold_cache: Dict[str, pd.DataFrame] = {}
+#加载阈值缓存
+def load_thresholds(
+    engine,
+    flag: str,
+    refresh: bool = False,
+    read_sql: Callable[[str, Union[object, None]], pd.DataFrame] = pd.read_sql,
+) -> pd.DataFrame:
     """
-    根据 TVB-N 预测值 (mg/100g) 返回风险等级字符串：'无' / '低' / '中' / '高'
+    从数据库把对应表的阈值读入缓存；返回 DataFrame（index=FoodClassificationCode）
     """
-    if tvbn_value is None:
-        return '无'
-    if tvbn_value < 15:
-        return '无'
-    elif 15 <= tvbn_value < 25:
-        return '低'
-    elif 25 <= tvbn_value < 30:
-        return '中'
-    else:
-        return '高'
+    nflag = _norm_flag(flag)
+    if (not refresh) and (nflag in _threshold_cache):
+        return _threshold_cache[nflag]
 
+    table = _TABLE_MAP[nflag]
+    sql = f"SELECT {', '.join(_NEEDED_COLS)} FROM {table}"
+    df = read_sql(sql, engine).copy()
+    df = df[_NEEDED_COLS].drop_duplicates(subset=["FoodClassificationCode"])
+    df.set_index("FoodClassificationCode", inplace=True)
+    for c in ("LowRiskLine", "MiddleRiskLine", "HighRiskLine"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    _threshold_cache[nflag] = df
+    return df
+def _norm_flag(flag: str) -> str:
+    if flag in ("chem", "化学"):
+        return "chem"
+    if flag in ("bio", "生物"):
+        return "bio"
+    raise ValueError(f"flag 只能是 'chem'/'化学' 或 'bio'/'生物'，收到：{flag}")
+
+def get_thresholds(
+    food_code: str,
+    flag: str,
+    engine,
+    refresh: bool = False,
+    read_sql: Callable[[str, Union[object, None]], pd.DataFrame] = pd.read_sql,
+) -> Optional[Tuple[float, float, float]]:
+    """
+    返回 (low, mid, high)；没有或缺失则返回 None
+    """
+    df = load_thresholds(engine, flag, refresh=refresh, read_sql=read_sql)
+    if food_code not in df.index:
+        return None
+    row = df.loc[food_code]
+    low, mid, high = row["LowRiskLine"], row["MiddleRiskLine"], row["HighRiskLine"]
+    if pd.isna(low) or pd.isna(mid) or pd.isna(high):
+        return None
+    return float(low), float(mid), float(high)
+
+def determine_risk_level(
+    food_code: str,
+    value: Optional[float],
+    flag: str,
+    engine,
+    *,
+    return_detail: bool = False,
+    refresh: bool = False,
+    read_sql: Callable[[str, Union[object, None]], pd.DataFrame] = pd.read_sql,
+):
+    """
+    通用风险等级判断（适用于化学/生物的任意标志物）：
+    规则：value < low → '无'；[low, mid) → '低'；[mid, high) → '中'；>= high → '高'
+    value 为 None 返回 '无'；找不到阈值返回 '未知'
+    """
+    if value is None:
+        return ("无", None) if return_detail else "无"
+
+    th = get_thresholds(food_code, flag, engine, refresh=refresh, read_sql=read_sql)
+    if th is None:
+        return ("未知", None) if return_detail else "未知"
+
+    low, mid, high = th
+    if value < low:
+        lvl = "无"
+    elif value < mid:
+        lvl = "低"
+    elif value < high:
+        lvl = "中"
+    else:
+        lvl = "高"
+    return (lvl, (low, mid, high)) if return_detail else lvl
 
 
 # ==============================================================================
 # --- 生成TVB-N预测记录  ---
 # ==============================================================================
-def generate_tvbn_record(row, food_info, tvbn_predict_value):
+def generate_tvbn_record(row, food_info, tvbn_predict_value, engine, flag='化学'):
     """
     【TVB-N记录生成函数】
     根据计算出的TVB-N含量值，生成要插入数据库的记录字典。
+    直接使用通用 determine_risk_level 从数据库阈值表判级。
     """
     monitor_num = row.get('MonitorNum')
     if monitor_num is None:
         return None
 
-    # 调用上面的辅助函数来获取风险名称和风险等级
-    # 现在可以安全地解包为两个变量
-    risk_level = determine_risk_level_tvbn(tvbn_predict_value)
+    food_code = food_info.get("FoodClassificationCode")
+    risk_level = determine_risk_level(food_code, tvbn_predict_value, flag, engine)
 
     return {
         "PredictResultID": f"{monitor_num}11",
@@ -789,12 +866,13 @@ def generate_tvbn_record(row, food_info, tvbn_predict_value):
         "FoodClassificationCode": food_info.get("FoodClassificationCode"),
         "Temp": row.get("Temp"),
         "Humid": row.get("Humid"),
-        "PredictFlag": "化学",
+        "PredictFlag": flag,                 # 默认“化学”，也可传入“生物”
         "RiskName": "挥发性盐基氮",
         "PredictValue": tvbn_predict_value,
         "Unit": "mg/100g",
-        "RiskLevel": risk_level  # 存入风险名称，如 '低'
+        "RiskLevel": risk_level
     }
+
 
 
 # 生成温度预测记录
